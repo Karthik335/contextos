@@ -1,0 +1,6 @@
+My notes (13 Oct)
+
+- Haven't started Unit 4 yet (ER diagrams, normalisation). Need it for the DBMS assignment and IA-2.
+- Lab record: experiments 7 and 8 are NOT signed yet.
+- Plan: revise DAA on Wednesday night before the test.
+- Going home on Friday 30 Oct evening after the DBMS test.

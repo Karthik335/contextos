@@ -1,0 +1,12 @@
+run = "npm run dev"
+modules = ["nodejs-22"]
+
+[deployment]
+build = ["npm", "run", "build"]
+run = ["npm", "start"]
+# Reserved VM: background jobs are kept in memory, so use one always-on instance.
+deploymentTarget = "gce"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
