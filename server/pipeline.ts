@@ -9,7 +9,7 @@ const isPrivateNow = () => ai.privateMode.getStore() === true;
 import { extractFacts } from "./prompts.js";
 import { Extraction } from "./schemas.js";
 import { readDocx, readImage, readPdf, readPptx, readSheet, readText } from "./ingest/documents.js";
-import { MAX_MEDIA_SECONDS, mergeTimeline, mmss, probe, readFrames, transcribe } from "./ingest/media.js";
+import { AUDIO_OFF, AUDIO_OFF_MESSAGE, MAX_MEDIA_SECONDS, mergeTimeline, mmss, probe, readFrames, transcribe } from "./ingest/media.js";
 import type { Fact, JobStatus, Segment, SourceKind, SourceResult } from "../shared/types.js";
 
 const jobs = new Map<string, JobStatus>();
@@ -126,7 +126,10 @@ async function process(
         durationSec = info.duration;
         if (info.duration > MAX_MEDIA_SECONDS)
           throw new Error(`Media is ${mmss(info.duration)} long; the limit is ${MAX_MEDIA_SECONDS / 60} minutes.`);
-        const speech = info.hasAudio ? await transcribe(file.path, workDir, info.duration, onProgress) : [];
+        // Small hosted servers can't run Whisper: audio files get a clear message, videos are read from frames only.
+        if (AUDIO_OFF && kind === "audio") throw new Error(AUDIO_OFF_MESSAGE);
+        const speech = info.hasAudio && !AUDIO_OFF ? await transcribe(file.path, workDir, info.duration, onProgress) : [];
+        if (AUDIO_OFF && info.hasAudio) notes.push("Speech in this video was not transcribed (audio is turned off on this hosted demo).");
         if (kind === "video" && info.hasVideo) {
           const r = await readFrames(file.path, workDir, info.duration, onProgress);
           frames = r.frames;

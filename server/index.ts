@@ -36,6 +36,7 @@ app.get("/api/status", async (_req, res) => {
     reasoningModel: ai.REASONING_MODEL,
     visionFirst: ai.VISION_FIRST,
     hasKey,
+    audio: process.env.AUDIO_TRANSCRIPTION === "off" ? "off" : "whisper",
   });
 });
 

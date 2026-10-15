@@ -134,8 +134,13 @@ function loadWhisper(): Promise<any> {
 }
 
 /** Called at server start, so the first audio file in a demo doesn't wait for Whisper to load. */
+/** AUDIO_TRANSCRIPTION=off: for small hosted servers (e.g. Render free, 512 MB), where Whisper runs out of memory. */
+export const AUDIO_OFF = process.env.AUDIO_TRANSCRIPTION === "off";
+export const AUDIO_OFF_MESSAGE =
+  "Audio transcription is turned off on this hosted demo (the free server doesn't have enough memory for Whisper). Run ContextOS locally to read audio, or upload a document instead.";
+
 export function warmUpWhisper() {
-  if (process.env.WHISPER_WARMUP === "0") return;
+  if (process.env.WHISPER_WARMUP === "0" || AUDIO_OFF) return;
   loadWhisper().catch((err) => console.warn("[whisper] warm-up failed (audio will retry on first use):", String(err?.message ?? err).slice(0, 160)));
 }
 

@@ -82,6 +82,8 @@ No key yet? Set `MOCK_AI=1` to click through the UI with a rule-based stand-in. 
 
 Audio is transcribed by open-source **Whisper** (`Xenova/whisper-base`, 8-bit, on CPU), installed with the project (`@huggingface/transformers`). The first audio file downloads the model once (about 80 MB, needs internet); after that it works offline. Set `WHISPER_MODEL=Xenova/whisper-small` for better accuracy on a machine with more memory.
 
+**Small hosted servers:** Whisper needs more than 512 MB of memory while it transcribes, so on a small plan (e.g. Render free) set `AUDIO_TRANSCRIPTION=off`. Audio files then get a clear message instead of crashing the server, and videos are read from their frames only. Audio works on any machine with ~1 GB+ free memory, and runs on the GPU locally with `WHISPER_DEVICE=dml` (Windows) or `cuda`.
+
 ### Run fully offline (Private mode)
 
 Private mode runs **everything on your own computer**: Gemma 4 through [Ollama](https://ollama.com) for images, extraction, analysis and chat, and Whisper for audio. Nothing is sent to the internet. It only works when ContextOS itself runs on your computer: a hosted copy (like the Render demo) can't reach Ollama on your laptop, so the switch is disabled there.
