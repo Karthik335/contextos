@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { z } from "zod";
 import * as ai from "./ai.js";
 import { getJob, kindOf, startJob } from "./pipeline.js";
+import { warmUpWhisper } from "./ingest/media.js";
 import { buildChat, runAnalysis } from "./analysis.js";
 
 const app = express();
@@ -204,6 +205,8 @@ if (isProd) {
 
 app.listen(PORT, "0.0.0.0", () => {
   if (!ai.MOCK && process.env.GEMINI_API_KEY) void ai.geminiModel(); // discover the backup model early
+  // Load Whisper in the background now, so the first audio file isn't slow.
+  if (!ai.MOCK && !ai.AUDIO_MODEL) setTimeout(() => warmUpWhisper(), 3000);
   console.log(`ContextOS running on http://localhost:${PORT}`);
   console.log(
     ai.MOCK

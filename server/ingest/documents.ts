@@ -11,12 +11,12 @@ import type { Segment } from "../../shared/types.js";
 
 type Progress = (step: string, progress: number) => void;
 
-/** Resize to keep requests small; Gemma reads text fine at 1280px. */
+/** Longest side at most 1280 px, re-encoded as JPEG quality 85: small requests, text stays readable. */
 async function prepareImage(buf: Buffer) {
   const out = await sharp(buf, { failOn: "none" })
     .rotate()
     .resize({ width: 1280, height: 1280, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 80 })
+    .jpeg({ quality: 85 })
     .toBuffer();
   return { mimeType: "image/jpeg", base64: out.toString("base64") };
 }

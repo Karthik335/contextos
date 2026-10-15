@@ -48,7 +48,8 @@ function ai() {
 
 /** Private mode for the current request/job: every model call goes to local Gemma (Ollama). */
 export const privateMode = new AsyncLocalStorage<boolean>();
-const isPrivate = () => !MOCK && privateMode.getStore() === true;
+// A hosted server (Render) can never reach Ollama on a laptop, so Private mode is ignored there.
+const isPrivate = () => !MOCK && !local.HOSTED && privateMode.getStore() === true;
 export const LOCAL_MODEL = local.LOCAL_MODEL;
 export const localStatus = local.localStatus;
 
@@ -67,9 +68,11 @@ function toLocal(contents: Content[]): local.LocalMessage[] {
 async function localCached(messages: local.LocalMessage[], opts: { json?: boolean; maxTokens?: number; temperature?: number }) {
   const key = createHash("sha256").update(local.LOCAL_MODEL).update(JSON.stringify(messages)).update(JSON.stringify(opts)).digest("hex");
   const hit = await cacheGet(key);
-  modelUsage.getStore()?.add(local.LOCAL_MODEL);
-  if (hit) return hit;
-  const out = await local.localChat(messages, opts);
+  if (hit) {
+    modelUsage.getStore()?.add(local.LOCAL_MODEL);
+    return hit;
+  }
+  const out = await local.localChat(messages, opts, (m) => modelUsage.getStore()?.add(m));
   void cachePut(key, out);
   return out;
 }
@@ -144,23 +147,45 @@ const isConfigRejection = (err: unknown) =>
 
 /** Retry the SAME model: server hiccups twice (2 s, 5 s), rate limits twice (8 s, 20 s). */
 async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
-  const waits: Record<string, number[]> = { server: [2000, 5000], rate: [15000, 30000] };
+  // server errors: 3 retries with backoff; rate limits: wait as Google asks; timeouts: 1 retry.
+  const waits: Record<string, number[]> = { server: [2000, 5000, 10000], rate: [15000, 30000, 45000], timeout: [2000] };
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
       const status = statusOf(err);
-      const kind = status === 429 ? "rate" : [500, 502, 503, 504].includes(status) ? "server" : null;
+      const msg = String((err as any)?.message ?? err);
+      const isTimeout = (err as any)?.name === "AbortError" || /aborted|timed? ?out|deadline/i.test(msg);
+      const kind = status === 429 ? "rate" : [500, 502, 503, 504].includes(status) ? "server" : isTimeout ? "timeout" : null;
       if (!kind || attempt >= waits[kind].length) throw err;
       // Google says how long to wait, e.g. "retryDelay": "23s".
-      const asked = /retry(?:Delay| in)[^0-9]{0,6}(\d+(?:\.\d+)?)\s*s/i.exec(String((err as any)?.message ?? err));
+      const asked = /retry(?:Delay| in)[^0-9]{0,6}(\d+(?:\.\d+)?)\s*s/i.exec(msg);
       const wait = kind === "rate" && asked ? Math.min(60000, Number(asked[1]) * 1000 + 1000) : waits[kind][attempt];
-      const quota = /"quotaId"\s*:\s*"([^"]+)"/.exec(String((err as any)?.message ?? err))?.[1];
-      console.warn(`[ai] ${label}: HTTP ${status}${quota ? ` (${quota})` : ""}, retrying in ${Math.round(wait / 1000)}s`);
+      const quota = /"quotaId"\s*:\s*"([^"]+)"/.exec(msg)?.[1];
+      console.warn(`[ai] ${label}: ${kind === "timeout" ? "timeout" : `HTTP ${status}`}${quota ? ` (${quota})` : ""}, retry ${attempt + 1} in ${Math.round(wait / 1000)}s`);
       if (kind === "rate" && quota && /PerDay/i.test(quota)) throw err; // daily limit: waiting won't help
-      if (kind === "rate") notify(`Waiting for Gemma's free-tier limit (${Math.round(wait / 1000)}s)…`);
+      notify(
+        kind === "rate"
+          ? `Waiting for Gemma's free-tier limit (${Math.round(wait / 1000)}s)…`
+          : `Google's Gemma service ${kind === "timeout" ? "was slow" : "hiccuped"}, trying again (${attempt + 2} of ${waits[kind].length + 1})…`,
+      );
       await sleep(wait);
     }
+  }
+}
+
+/** At most N model calls at a time on this server (default 2), whoever sends them. */
+const MAX_CALLS = Number(process.env.MAX_CONCURRENT_CALLS) || 2;
+let activeCalls = 0;
+const callQueue: (() => void)[] = [];
+async function limited<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeCalls >= MAX_CALLS) await new Promise<void>((r) => callQueue.push(r));
+  activeCalls++;
+  try {
+    return await fn();
+  } finally {
+    activeCalls--;
+    callQueue.shift()?.();
   }
 }
 
@@ -237,7 +262,7 @@ async function callModel(model: string, o: CallOpts): Promise<string> {
         await pace(model, estimateTokens(o.contents, budget));
         const res = await withRetry(
           () =>
-            ai().models.generateContent({
+            limited(() => ai().models.generateContent({
               model,
               contents: o.contents,
               config: {
@@ -246,7 +271,7 @@ async function callModel(model: string, o: CallOpts): Promise<string> {
                 abortSignal: AbortSignal.timeout(o.timeoutMs),
                 ...(thinkingConfig ? { thinkingConfig } : {}),
               },
-            }),
+            })),
           model,
         );
         thinkingMode.set(model, idx);
@@ -339,6 +364,8 @@ export async function vision(images: InlineFile[], prompt: string): Promise<stri
   const gemini = await geminiModel(); // null unless GEMINI_BACKUP=1
   const order = VISION_FIRST === "gemini" && gemini ? [gemini, MODEL] : [MODEL, gemini];
   const parts: Part[] = [{ text: prompt }, ...images.map((i) => ({ inlineData: { mimeType: i.mimeType, data: i.base64 } }))];
+  // Only Gemma 4 31B reads images on this API (the 26B model returns errors or invented text for
+  // images), so failures are handled by retrying 31B: 3 retries on 500/503, 1 on timeouts (withRetry).
   return runChain(order, {
     contents: [{ role: "user", parts }],
     maxOutputTokens: 2048,
@@ -379,11 +406,12 @@ export async function audioChunk(chunk: InlineFile): Promise<string> {
 export async function streamChat(contents: Content[]): Promise<{ model: string; stream: AsyncGenerator<string> }> {
   if (MOCK) return { model: "mock", stream: mock.streamChat(contents) };
   if (isPrivate()) {
-    const stream = local.localStream(toLocal(contents), 2048);
+    let usedModel = local.LOCAL_MODEL;
+    const stream = local.localStream(toLocal(contents), 2048, (m) => (usedModel = m));
     // Pull the first piece now, so an error (Ollama not running) is reported cleanly.
     const it = stream[Symbol.asyncIterator]();
     const first = await it.next();
-    modelUsage.getStore()?.add(local.LOCAL_MODEL);
+    modelUsage.getStore()?.add(usedModel);
     const rest = async function* () {
       if (!first.done && first.value) yield first.value;
       for (;;) {
@@ -392,7 +420,7 @@ export async function streamChat(contents: Content[]): Promise<{ model: string; 
         yield n.value;
       }
     };
-    return { model: local.LOCAL_MODEL, stream: rest() };
+    return { model: usedModel, stream: rest() };
   }
   // 1. A question asked before with the same sources: answer instantly from the disk cache.
   const ckey = cacheKey(`chat:${REASONING_MODEL}`, { contents, maxOutputTokens: 4096 });

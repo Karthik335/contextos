@@ -1,6 +1,7 @@
 // Audio and video: ffmpeg converts, Gemma 4 transcribes (or local Whisper as fallback),
 // and Gemma 4 vision reads key frames from videos.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
@@ -86,31 +87,104 @@ async function transcribeInCloud(file: string, workDir: string, duration: number
   return cleanTranscript(segments.filter((s) => s && s.text !== "(no speech)"), duration);
 }
 
-/** Fallback when no audio-capable Gemma model is configured: open-source Whisper, run locally. */
-async function transcribeWithWhisper(file: string, duration: number, onProgress: Progress): Promise<Segment[]> {
-  onProgress("Loading Whisper (first time can take a minute)", 0.15);
-  let pipelineFn: any;
-  try {
-    // Optional dependency: npm install @huggingface/transformers
-    const mod: any = await import(/* @vite-ignore */ "@huggingface/" + "transformers");
-    pipelineFn = mod.pipeline;
-  } catch {
-    throw new Error(
-      "Audio needs either GEMMA_AUDIO_MODEL (an audio-capable Gemma 4 model) or the optional Whisper package (npm install @huggingface/transformers).",
-    );
+/* ---------------- Whisper (open-source speech-to-text, runs on this server's CPU) ---------------- */
+
+// Whisper "base", 8-bit quantized: about 80 MB, fits Render's 512 MB free plan.
+// The first run downloads the model once (needs internet); after that it works offline.
+const WHISPER_MODEL = process.env.WHISPER_MODEL || "Xenova/whisper-base";
+const WHISPER_CACHE = path.resolve(".cache", "whisper");
+let asrPromise: Promise<any> | null = null;
+let asrReady = false;
+
+/** Load Whisper once and keep it in memory (loading takes far longer than transcribing a short clip). */
+function loadWhisper(): Promise<any> {
+  if (!asrPromise) {
+    const started = Date.now();
+    asrPromise = (async () => {
+      let mod: any;
+      try {
+        // Optional dependency: npm install @huggingface/transformers
+        mod = await import(/* @vite-ignore */ "@huggingface/" + "transformers");
+      } catch {
+        throw new Error("Audio needs the Whisper package: run npm install (it installs @huggingface/transformers).");
+      }
+      // WHISPER_DEVICE=dml uses the GPU on Windows (DirectML), =cuda on NVIDIA+Linux; falls back to CPU.
+      const wanted = (process.env.WHISPER_DEVICE || "cpu").toLowerCase();
+      const devices = wanted === "cpu" ? ["cpu"] : [wanted, "cpu"];
+      let asr: any;
+      let device = "cpu";
+      for (const d of devices) {
+        try {
+          const dtype = process.env.WHISPER_DTYPE || (d === "cpu" ? "q8" : "fp32"); // GPUs prefer fp32/fp16
+          asr = await mod.pipeline("automatic-speech-recognition", WHISPER_MODEL, { dtype, device: d });
+          device = d;
+          break;
+        } catch (err: any) {
+          if (d === "cpu") throw err;
+          console.warn(`[whisper] device "${d}" not available (${String(err?.message ?? err).slice(0, 120)}); using the CPU`);
+        }
+      }
+      asrReady = true;
+      console.log(`[whisper] ${WHISPER_MODEL} loaded on ${device.toUpperCase()} in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+      return asr;
+    })();
+    asrPromise.catch(() => (asrPromise = null)); // allow another try later
   }
+  return asrPromise;
+}
+
+/** Called at server start, so the first audio file in a demo doesn't wait for Whisper to load. */
+export function warmUpWhisper() {
+  if (process.env.WHISPER_WARMUP === "0") return;
+  loadWhisper().catch((err) => console.warn("[whisper] warm-up failed (audio will retry on first use):", String(err?.message ?? err).slice(0, 160)));
+}
+
+async function transcribeWithWhisper(file: string, duration: number, onProgress: Progress): Promise<Segment[]> {
+  ai.modelUsage.getStore()?.add(`whisper-${WHISPER_MODEL.split("whisper-")[1] ?? "base"}`);
+
+  // Same audio again (e.g. a rehearsed demo): reuse the saved transcript.
+  const bytes = await fs.readFile(file);
+  const key = createHash("sha256").update(WHISPER_MODEL + ":v2-capped").update(bytes).digest("hex");
+  const cacheFile = path.join(WHISPER_CACHE, key + ".json");
+  try {
+    const hit = JSON.parse(await fs.readFile(cacheFile, "utf8")) as Segment[];
+    onProgress("Transcript ready (saved from before)", 0.7);
+    return hit;
+  } catch {
+    /* not cached */
+  }
+
+  if (!asrReady) onProgress("Loading Whisper (only the first time)", 0.15);
+  const asrP = loadWhisper();
   const { stdout } = await run(ffmpegPath as unknown as string, [
     "-v", "error", "-i", file, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1",
   ]);
   const samples = new Float32Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.byteLength / 4));
-  const asr = await pipelineFn("automatic-speech-recognition", process.env.WHISPER_MODEL || "Xenova/whisper-base");
+  const asr = await asrP;
   onProgress(`Transcribing ${mmss(duration)} of audio with Whisper`, 0.35);
-  const out: any = await asr(samples, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: true, language: "english" });
+  const started = Date.now();
+  // Cap the output by the clip length (people say at most ~4 words, ~6 tokens, per second).
+  // On non-speech sounds (music, animals) Whisper otherwise "hallucinates" up to 448 tokens per
+  // 30 s window, which can take minutes on a CPU. Real speech is never longer than this cap.
+  const maxNewTokens = Math.min(224, Math.ceil(Math.min(duration, 30) * 6) + 24);
+  const out: any = await asr(samples, {
+    chunk_length_s: 30,
+    stride_length_s: 5,
+    return_timestamps: true,
+    language: "english",
+    task: "transcribe",
+    max_new_tokens: maxNewTokens,
+    no_repeat_ngram_size: 4,
+  });
+  console.log(`[whisper] ${mmss(duration)} transcribed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
   const chunks: any[] = out.chunks ?? [{ timestamp: [0], text: out.text }];
-  return cleanTranscript(
+  const segments = cleanTranscript(
     chunks.filter((c) => c.text?.trim()).map((c) => ({ location: mmss(c.timestamp?.[0] ?? 0), text: c.text.trim() })),
     duration,
   );
+  await fs.mkdir(WHISPER_CACHE, { recursive: true }).catch(() => {});
+  await fs.writeFile(cacheFile, JSON.stringify(segments)).catch(() => {});
+  return segments;
 }
 
 /**

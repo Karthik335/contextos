@@ -9,7 +9,7 @@ export interface ServerStatus {
   reasoningModel?: string;
   visionFirst: string;
   hasKey: boolean;
-  local?: { running: boolean; hasModel: boolean; model: string };
+  local?: { running: boolean; hasModel: boolean; model: string; models?: string[]; hosted?: boolean };
 }
 
 /** fetch() that explains the most common local problem: the server isn't running. */

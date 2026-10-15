@@ -18,6 +18,7 @@ export function labelFacts(sources: Pick<SourcePayload, "facts">[]) {
 /** Friendly model name for the UI, e.g. "Gemma 4 31B" or "Gemini 2.5 Flash". */
 export function modelLabel(m: string) {
   if (m === "mock") return "Mock (not AI)";
+  if (/whisper/i.test(m)) return "Whisper";
   const loc = /^gemma4:(\w+)/i.exec(m);
   if (loc) return `Gemma 4 ${loc[1].toUpperCase()} · on this computer`;
   const g4 = /gemma-4-(\w+?)(?:-a\d+b)?-it/i.exec(m);

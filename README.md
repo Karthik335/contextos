@@ -21,7 +21,7 @@ Built on **Gemma 4** (open weights, Apache 2.0) through the Google Gemini API: t
 7. **Contexts** (like Projects in ChatGPT/Claude). Shared files, instructions and a briefing, with many chats inside.
 8. **Profiles** (Netflix-style "Who's analysing?"), with an optional PIN.
 9. **Answer in your language**: pick English, Hindi, Kannada, Tamil, Telugu, Malayalam, Marathi, Bengali, Gujarati, Punjabi, Urdu or others in the composer. Briefings and co-pilot answers come in that language, whatever language the sources are in (Gemma 4 understands 140+ languages).
-10. **Private mode**: one switch runs everything on **Gemma 4 E4B on your own computer** through [Ollama](https://ollama.com): images, extraction, analysis and chat, with Whisper for audio. Nothing leaves the machine, it works offline, and there are no rate limits. Setup: install Ollama, then `ollama pull gemma4:e4b`.
+10. **Private mode**: when ContextOS runs on your own computer, one switch runs everything on **Gemma 4 E4B (with E2B as a faster fallback)** through [Ollama](https://ollama.com): images, extraction, analysis and chat, with Whisper for audio. Nothing leaves the machine, it works offline, and there are no rate limits. See [Run fully offline](#run-fully-offline-private-mode).
 11. **Act on it (Gemma 4 function calling)**: one button turns the briefing into actions. Gemma 4 is given three tools in the standard function-calling format (`create_calendar_event`, `draft_message`, `create_checklist`) and decides which to call and with what arguments. Nothing runs until you approve: dates become `.ics` files or Google Calendar events, message drafts are editable and open in email or WhatsApp, and the checklist becomes tickable. The server drops calls with past dates, dates that don't match the cited fact, or facts that are outdated. Click `</>` on any card to see the exact function call Gemma made. Each key date in the briefing also has a one-click calendar button.
 12. **Snap with camera**: photograph a notice, page or whiteboard straight into the chat. Laptops get a live preview; phones open the native camera.
 13. **Agent Skill**: ContextOS is packaged as an [Agent Skill](https://agentskills.io) in [`skills/contextos-briefing/`](skills/contextos-briefing/SKILL.md), so any skills-compatible agent can use it (see below).
@@ -36,7 +36,7 @@ Built on **Gemma 4** (open weights, Apache 2.0) through the Google Gemini API: t
 | Connecting facts across sources: relationships, gaps, actions | **Gemma 4 26B A4B** (`GEMMA_REASONING_MODEL` to change) | fast on the free API (~5 s vs ~40 s for 31B) |
 | Co-pilot answers with citations (streaming, multi-turn) | **Gemma 4 26B A4B** | answers in seconds |
 | "Act on it": choosing tools and arguments (function calling) | **Gemma 4 26B A4B** (31B as backup) | output validated per call; user approves each |
-| Audio transcription | an audio-capable Gemma 4 model (`GEMMA_AUDIO_MODEL`, E4B/E2B) if available, else **Whisper** (open-source, runs locally) | |
+| Audio transcription (mp3, wav, m4a, and the audio track of videos) | **Whisper base** (open-source, runs on the server's CPU, 8-bit), then Gemma 4 26B extracts the facts | the Gemma 4 models on the Gemini API don't accept audio; labelled "via Whisper + Gemma 4 26B" |
 | Time-conflict detection, date sorting, "what changed" diff | plain TypeScript (deterministic) | no AI needed |
 | PDF / DOCX / PPTX / XLSX text, audio/video conversion | unpdf, mammoth, jszip, SheetJS, ffmpeg | |
 
@@ -45,7 +45,9 @@ Every result in the UI shows a small label with the model that produced it.
 **Reliability on the free API**
 - Gemma's thinking is set to minimal, so answers don't wait 30+ seconds.
 - Requests are kept small (documents are read in ~9k-character parts).
-- A failed call is retried on the same Gemma model.
+- A failed call is retried on the same Gemma model: 3 retries with backoff (2 s, 5 s, 10 s) on HTTP 500/503, waits as asked on 429, and 1 retry on a timeout. Only after that does a file show **Retry**.
+- At most 2 model calls run at a time on the server (`MAX_CONCURRENT_CALLS`), and the browser processes 2 files at a time.
+- Images are resized to at most 1280 px and re-encoded as JPEG (quality 85) before they are sent. Vision calls time out after 90 s per attempt.
 - If the main model fails, the other Gemma model takes over for text steps.
 - Successful answers are cached on disk (`.cache/`), so repeating a demo is instant. Set `AI_CACHE=0` to disable.
 - Failed files get a **Retry** button.
@@ -71,20 +73,36 @@ npm run dev               # http://localhost:3000
 GEMINI_API_KEY=your-key-from-aistudio.google.com
 GEMMA_MODEL=gemma-4-31b-it          # vision + reasoning
 GEMMA_FAST_MODEL=gemma-4-26b-a4b-it  # fast text extraction
-GEMMA_AUDIO_MODEL=                   # optional: an audio-capable Gemma 4 model (E4B / E2B)
+GEMMA_AUDIO_MODEL=                   # leave empty: audio uses Whisper
 ```
 
 No key yet? Set `MOCK_AI=1` to click through the UI with a rule-based stand-in. It is **not** AI and the app shows a red "Mock mode" badge.
 
-### Audio without an audio-capable Gemma model
+### Audio
 
-If `GEMMA_AUDIO_MODEL` is empty, ContextOS uses Whisper locally. Install it once:
+Audio is transcribed by open-source **Whisper** (`Xenova/whisper-base`, 8-bit, on CPU), installed with the project (`@huggingface/transformers`). The first audio file downloads the model once (about 80 MB, needs internet); after that it works offline. Set `WHISPER_MODEL=Xenova/whisper-small` for better accuracy on a machine with more memory.
 
-```bash
-npm install @huggingface/transformers
-```
+### Run fully offline (Private mode)
 
-The first transcription downloads the Whisper model (`Xenova/whisper-base` by default; set `WHISPER_MODEL=Xenova/whisper-small` for better accuracy).
+Private mode runs **everything on your own computer**: Gemma 4 through [Ollama](https://ollama.com) for images, extraction, analysis and chat, and Whisper for audio. Nothing is sent to the internet. It only works when ContextOS itself runs on your computer: a hosted copy (like the Render demo) can't reach Ollama on your laptop, so the switch is disabled there.
+
+1. Install Ollama from ollama.com and start it.
+2. Download the models (once):
+   ```bash
+   ollama pull gemma4:e4b    # main model (smarter)
+   ollama pull gemma4:e2b    # faster fallback, used automatically if E4B fails
+   ```
+3. Start ContextOS locally:
+   ```bash
+   npm install
+   npm run dev               # http://localhost:3000
+   ```
+4. In the sidebar, turn on **Private mode**. The server checks `http://127.0.0.1:11434/api/tags` and enables the switch when Ollama is running with a Gemma model.
+5. Process one audio file once while online so Whisper's model is downloaded; after that, audio works offline too.
+
+Tips for 6–8 GB laptop GPUs (e.g. RTX 4050 6 GB): plug in the charger and use the laptop's performance mode; E4B (about 6.5 GB) partly runs on the CPU, so E2B is noticeably faster. To make E2B the main model, set `LOCAL_MODEL=gemma4:e2b` in `.env`. Private mode processes one file at a time and reads 6 frames per video.
+
+Ollama's API takes text and images, not audio, so in Private mode audio is transcribed by Whisper on your computer, which is still fully offline.
 
 ## Deploy
 
@@ -95,7 +113,7 @@ The first transcription downloads the Whisper model (`Xenova/whisper-base` by de
 4. Use a **Reserved VM** deployment: upload jobs are kept in memory, so a single always-on instance is required.
 
 **Render / Railway / any Node host**
-- Build command: `npm install && npm run build`
+- Build command: `npm install --include=dev && npm run build`
 - Start command: `npm start`
 - Add the same environment variables.
 - Use one instance, for the same reason.

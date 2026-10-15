@@ -24,14 +24,22 @@ export default function StatusPill() {
     };
   }, []);
 
+  const hosted = !!status?.local?.hosted;
+  // Private mode can't work on a hosted server: switch it off if it was left on.
+  useEffect(() => {
+    if (hosted && privateMode) setPrivateMode(false);
+  }, [hosted, privateMode, setPrivateMode]);
+
   if (!status) return null;
   const local = status.local;
-  const localReady = !!local?.running && !!local?.hasModel;
-  const localHint = !local?.running
+  const localReady = !hosted && !!local?.running && !!local?.hasModel;
+  const localHint = hosted
+    ? "Private mode is available when running ContextOS locally (with Ollama on your computer)."
+    : !local?.running
     ? "Start the Ollama app on this computer to use Private mode."
     : !local.hasModel
       ? `Download the model first: ollama pull ${local.model}`
-      : `Runs Gemma 4 on this computer (${local.model}). Nothing is sent to the internet.`;
+      : `Runs Gemma 4 on this computer (${(local.models ?? [local.model]).join(", then ")}). Nothing is sent to the internet.`;
 
   const cloudWarn = status.mock ? "Mock mode: not Gemma" : !status.hasKey ? "API key missing on server" : null;
   const usingPrivate = privateMode && !status.mock;
@@ -40,7 +48,9 @@ export default function StatusPill() {
     <div className="mx-3 mb-2 space-y-1.5">
       {/* Private mode switch */}
       <button
-        onClick={() => (localReady || privateMode) && setPrivateMode(!privateMode)}
+        onClick={() => !hosted && (localReady || privateMode) && setPrivateMode(!privateMode)}
+        disabled={hosted}
+        aria-disabled={!localReady && !privateMode}
         title={localHint}
         className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left transition ${
           usingPrivate ? "bg-resolved-soft" : "bg-surface/50 hover:bg-surface/80"
@@ -50,7 +60,17 @@ export default function StatusPill() {
         <span className="min-w-0 flex-1">
           <span className="block text-[12px] font-semibold">Private mode</span>
           <span className="block truncate text-[10.5px] text-ink-soft">
-            {usingPrivate ? (localReady ? "On this computer · offline" : "Ollama not reachable!") : localReady ? "Off · uses Google cloud" : !local?.running ? "Start Ollama to enable" : "Model not downloaded"}
+            {hosted
+              ? "Available when running locally"
+              : usingPrivate
+                ? localReady
+                  ? "On this computer · offline"
+                  : "Ollama not reachable!"
+                : localReady
+                  ? "Off · uses Google cloud"
+                  : !local?.running
+                    ? "Start Ollama to enable"
+                    : "Model not downloaded"}
           </span>
         </span>
         <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${usingPrivate ? "bg-resolved" : "bg-ink/20"}`}>
