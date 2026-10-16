@@ -19,6 +19,7 @@ export function labelFacts(sources: Pick<SourcePayload, "facts">[]) {
 export function modelLabel(m: string) {
   if (m === "mock") return "Mock (not AI)";
   if (/whisper/i.test(m)) return "Whisper";
+  if (/sarvam|saaras/i.test(m)) return "Sarvam AI";
   const loc = /^gemma4:(\w+)/i.exec(m);
   if (loc) return `Gemma 4 ${loc[1].toUpperCase()} · on this computer`;
   const g4 = /gemma-4-(\w+?)(?:-a\d+b)?-it/i.exec(m);

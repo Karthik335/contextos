@@ -29,14 +29,14 @@ app.get("/api/status", async (_req, res) => {
   res.json({
     mock: ai.MOCK,
     model: ai.MODEL,
-    audioModel: ai.AUDIO_MODEL || null,
+    audioModel: ai.AUDIO_MODEL || (process.env.SARVAM_API_KEY ? `Sarvam AI ${process.env.SARVAM_MODEL || "saaras:v4"} (Whisper offline)` : null),
     backupModel: hasKey ? await ai.geminiModel() : null,
     fastModel: ai.FAST_MODEL || null,
     local: await ai.localStatus(),
     reasoningModel: ai.REASONING_MODEL,
     visionFirst: ai.VISION_FIRST,
     hasKey,
-    audio: process.env.AUDIO_TRANSCRIPTION === "off" ? "off" : "whisper",
+    audio: process.env.SARVAM_API_KEY ? "sarvam" : process.env.AUDIO_TRANSCRIPTION === "off" ? "off" : "whisper",
   });
 });
 
@@ -212,6 +212,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(
     ai.MOCK
       ? "MOCK_AI=1: rule-based stand-in, NOT Gemma."
-      : `Gemma 4: ${ai.MODEL} (vision), ${ai.FAST_MODEL || ai.MODEL} (extraction), ${ai.REASONING_MODEL} (reasoning + chat); audio: ${ai.AUDIO_MODEL || "Whisper (local)"}${process.env.GEMINI_API_KEY ? "" : " (GEMINI_API_KEY missing!)"}`,
+      : `Gemma 4: ${ai.MODEL} (vision), ${ai.FAST_MODEL || ai.MODEL} (extraction), ${ai.REASONING_MODEL} (reasoning + chat); audio: ${ai.AUDIO_MODEL || (process.env.SARVAM_API_KEY ? "Sarvam AI (Whisper for Private mode)" : "Whisper (local)")}${process.env.GEMINI_API_KEY ? "" : " (GEMINI_API_KEY missing!)"}`,
   );
 });

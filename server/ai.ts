@@ -49,7 +49,7 @@ function ai() {
 /** Private mode for the current request/job: every model call goes to local Gemma (Ollama). */
 export const privateMode = new AsyncLocalStorage<boolean>();
 // A hosted server (Render) can never reach Ollama on a laptop, so Private mode is ignored there.
-const isPrivate = () => !MOCK && !local.HOSTED && privateMode.getStore() === true;
+export const isPrivate = () => !MOCK && !local.HOSTED && privateMode.getStore() === true;
 export const LOCAL_MODEL = local.LOCAL_MODEL;
 export const localStatus = local.localStatus;
 

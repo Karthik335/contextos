@@ -1,4 +1,4 @@
-// Audio and video: ffmpeg converts, Gemma 4 transcribes (or local Whisper as fallback),
+// Audio and video: ffmpeg converts, Sarvam AI (if SARVAM_API_KEY is set) or Whisper transcribes,
 // and Gemma 4 vision reads key frames from videos.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -49,7 +49,17 @@ export async function transcribe(file: string, workDir: string, duration: number
   const chunks = Math.max(1, Math.ceil(duration / CHUNK_SECONDS));
   onProgress(`Converting audio`, 0.1);
 
-  // Cloud first (audio-capable Gemma, else Gemini); local Whisper if no cloud model or if it fails.
+  // Sarvam AI first when SARVAM_API_KEY is set (not in Private mode: that stays on this computer).
+  if (useSarvam()) {
+    try {
+      return await transcribeWithSarvam(file, workDir, duration, chunks, onProgress);
+    } catch (err) {
+      console.warn("[sarvam] transcription failed:", String((err as any)?.message ?? err).slice(0, 200));
+      if (AUDIO_OFF_ENV) throw new Error("Sarvam AI couldn't transcribe this audio right now. Please try again in a minute.");
+      onProgress("Sarvam unavailable, using Whisper instead", 0.15);
+    }
+  }
+  // Cloud next (audio-capable Gemma, else Gemini); local Whisper if no cloud model or if it fails.
   if (!(await ai.canTranscribeInCloud())) return transcribeWithWhisper(file, duration, onProgress);
   try {
     return await transcribeInCloud(file, workDir, duration, chunks, onProgress);
@@ -85,6 +95,95 @@ async function transcribeInCloud(file: string, workDir: string, duration: number
   };
   await Promise.all([worker(), worker()]);
   return cleanTranscript(segments.filter((s) => s && s.text !== "(no speech)"), duration);
+}
+
+/* ---------------- Sarvam AI (speech-to-text API built for Indian languages) ---------------- */
+
+// Saaras understands English, Hindi, Kannada, Tamil, Telugu and other Indian languages, including
+// code-mixed speech ("Hinglish"). The REST API takes up to 30 s per request, so audio is sent in
+// 30 s chunks, like the cloud path above. Runs on Sarvam's servers: no model in our memory, so it
+// also works on Render's free 512 MB plan where Whisper does not fit.
+const SARVAM_KEY = process.env.SARVAM_API_KEY || "";
+const SARVAM_MODEL = process.env.SARVAM_MODEL || "saaras:v4";
+const SARVAM_MODE = process.env.SARVAM_MODE || "transcribe"; // transcribe | translate | codemix | translit | verbatim
+const SARVAM_URL = (process.env.SARVAM_BASE_URL || "https://api.sarvam.ai") + "/speech-to-text"; // base URL override is for tests
+const SARVAM_CACHE = path.resolve(".cache", "sarvam");
+
+export const useSarvam = () => !!SARVAM_KEY && !ai.isPrivate();
+
+async function sarvamChunk(wav: Buffer, name: string): Promise<string> {
+  const waits = [2000, 5000, 10000];
+  for (let attempt = 0; ; attempt++) {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), name);
+    form.append("model", SARVAM_MODEL);
+    form.append("mode", SARVAM_MODE);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    try {
+      const res = await fetch(SARVAM_URL, {
+        method: "POST",
+        headers: { "api-subscription-key": SARVAM_KEY },
+        body: form,
+        signal: ctrl.signal,
+      });
+      const body = await res.text();
+      if (res.ok) return String(JSON.parse(body).transcript ?? "");
+      const retryable = res.status === 429 || res.status >= 500;
+      if (!retryable || attempt >= waits.length) {
+        const hint = res.status === 401 || res.status === 403 ? " (check SARVAM_API_KEY)" : res.status === 402 ? " (Sarvam credits used up)" : "";
+        throw new Error(`Sarvam ${res.status}${hint}: ${body.slice(0, 200)}`);
+      }
+    } catch (err: any) {
+      if (String(err?.message ?? "").startsWith("Sarvam ")) throw err;
+      if (attempt >= waits.length) throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    await new Promise((r) => setTimeout(r, waits[attempt]));
+  }
+}
+
+async function transcribeWithSarvam(file: string, workDir: string, duration: number, chunks: number, onProgress: Progress): Promise<Segment[]> {
+  ai.modelUsage.getStore()?.add(`sarvam-${SARVAM_MODEL.replace(":", "-")}`);
+
+  // Same audio again (e.g. a rehearsed demo): reuse the saved transcript, no credits spent.
+  const bytes = await fs.readFile(file);
+  const key = createHash("sha256").update(`${SARVAM_MODEL}:${SARVAM_MODE}:`).update(bytes).digest("hex");
+  const cacheFile = path.join(SARVAM_CACHE, key + ".json");
+  try {
+    const hit = JSON.parse(await fs.readFile(cacheFile, "utf8")) as Segment[];
+    onProgress("Transcript ready (saved from before)", 0.7);
+    return hit;
+  } catch {
+    /* not cached */
+  }
+
+  const segments: Segment[] = new Array(chunks);
+  let done = 0;
+  const work = Array.from({ length: chunks }, (_, i) => i);
+  const started = Date.now();
+  const worker = async () => {
+    while (work.length) {
+      const i = work.shift()!;
+      const start = i * CHUNK_SECONDS;
+      const out = path.join(workDir, `sarvam_${i}.wav`);
+      await run(ffmpegPath as unknown as string, [
+        "-y", "-v", "error", "-ss", String(start), "-t", String(CHUNK_SECONDS), "-i", file,
+        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", out,
+      ]);
+      const text = (await sarvamChunk(await fs.readFile(out), `chunk_${i}.wav`)).trim();
+      segments[i] = { location: mmss(start), text: text || "(no speech)" };
+      done++;
+      onProgress(`Transcribing with Sarvam AI ${mmss(start)}–${mmss(Math.min(duration, start + CHUNK_SECONDS))} (${done} of ${chunks})`, 0.15 + 0.55 * (done / chunks));
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  console.log(`[sarvam] ${mmss(duration)} transcribed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  const result = cleanTranscript(segments.filter((s) => s && s.text !== "(no speech)"), duration);
+  await fs.mkdir(SARVAM_CACHE, { recursive: true }).catch(() => {});
+  await fs.writeFile(cacheFile, JSON.stringify(result)).catch(() => {});
+  return result;
 }
 
 /* ---------------- Whisper (open-source speech-to-text, runs on this server's CPU) ---------------- */
@@ -135,12 +234,14 @@ function loadWhisper(): Promise<any> {
 
 /** Called at server start, so the first audio file in a demo doesn't wait for Whisper to load. */
 /** AUDIO_TRANSCRIPTION=off: for small hosted servers (e.g. Render free, 512 MB), where Whisper runs out of memory. */
-export const AUDIO_OFF = process.env.AUDIO_TRANSCRIPTION === "off";
+const AUDIO_OFF_ENV = process.env.AUDIO_TRANSCRIPTION === "off";
+/** Audio is off only when Whisper is switched off AND there is no Sarvam key to use instead. */
+export const AUDIO_OFF = AUDIO_OFF_ENV && !SARVAM_KEY;
 export const AUDIO_OFF_MESSAGE =
   "Audio transcription is turned off on this hosted demo (the free server doesn't have enough memory for Whisper). Run ContextOS locally to read audio, or upload a document instead.";
 
 export function warmUpWhisper() {
-  if (process.env.WHISPER_WARMUP === "0" || AUDIO_OFF) return;
+  if (process.env.WHISPER_WARMUP === "0" || AUDIO_OFF_ENV) return;
   loadWhisper().catch((err) => console.warn("[whisper] warm-up failed (audio will retry on first use):", String(err?.message ?? err).slice(0, 160)));
 }
 
